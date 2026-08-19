@@ -2,13 +2,543 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="0; url=web/index.html">
-  <title>Redirecting to AeroMetrics Pro...</title>
-  <script>
-    window.location.href = "web/index.html";
-  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AeroMetrics Pro | IoT Weather Station & OLED HUD</title>
+  <meta name="description" content="Professional IoT Weather Station & Atmospheric HUD powered by ESP32, DHT11, BMP280, and SSD1306 OLED with Glassmorphism UI.">
+  
+  <!-- Google Fonts: Outfit & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- FontAwesome Icons for crisp glyphs -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Chart.js for glassy telemetry trends -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Main Stylesheet -->
+  <link rel="stylesheet" href="style.css">
 </head>
-<body style="background:#060c12;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-  <p>Loading AeroMetrics Pro IoT Dashboard... <a href="web/index.html" style="color:#00f2fe">Click here if not redirected</a>.</p>
+<body>
+  <!-- Video Background Container with Fallback and Dynamic Overlay -->
+  <div class="video-bg-container">
+    <video id="bgVideo" autoplay muted loop playsinline poster="https://images.unsplash.com/photo-1511497584788-87676104235f?auto=format&fit=crop&w=1920&q=80">
+      <!-- High quality serene nature / misty forest stream loop -->
+      <source src="https://assets.mixkit.co/videos/preview/mixkit-fog-over-a-green-pine-forest-42790-large.mp4" type="video/mp4">
+      <source src="https://cdn.pixabay.com/video/2020/04/18/36423-412700318_large.mp4" type="video/mp4">
+    </video>
+    <div class="video-overlay"></div>
+    <!-- Canvas for atmospheric particles (rain, mist, sun rays) -->
+    <canvas id="particleCanvas"></canvas>
+  </div>
+
+  <!-- Main Container -->
+  <div class="app-wrapper">
+    
+    <!-- Top Navigation Header -->
+    <header class="glass-header">
+      <div class="brand-section">
+        <div class="brand-badge">
+          <i class="fa-solid fa-satellite-dish pulse-icon"></i>
+        </div>
+        <div>
+          <h1 class="brand-title">AEROMETRICS <span class="accent-text">PRO</span></h1>
+          <p class="brand-subtitle">ESP32 Telemetry & OLED Station • Karmakar Industry</p>
+        </div>
+      </div>
+
+      <!-- Quick Metrics Bar in Header -->
+      <div class="header-status-group">
+        <div class="status-pill" id="connectionPill">
+          <span class="status-dot online"></span>
+          <span id="connectionLabel">LIVE SIMULATION</span>
+        </div>
+
+        <div class="system-clock-pill">
+          <i class="fa-regular fa-clock"></i>
+          <span id="headerClock">--:--:--</span>
+          <span class="date-chip" id="headerDate">--- --, ----</span>
+        </div>
+
+        <!-- Ambient Nature Audio Toggle -->
+        <button class="glass-btn audio-btn" id="audioToggleBtn" title="Toggle Ambient Forest Sounds" aria-label="Toggle Forest Audio">
+          <i class="fa-solid fa-volume-xmark" id="audioIcon"></i>
+        </button>
+
+        <!-- ESP32 Settings Modal Trigger -->
+        <button class="glass-btn settings-btn" id="settingsModalBtn" title="ESP32 Link Settings" aria-label="ESP32 Settings">
+          <i class="fa-solid fa-sliders"></i>
+          <span>ESP32 Link</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Dashboard Grid -->
+    <main class="dashboard-grid">
+      
+      <!-- LEFT / TOP ROW: PRIMARY WEATHER SENSOR METRICS -->
+      <section class="metrics-grid">
+        
+        <!-- CARD 1: TEMPERATURE (DHT11 + BMP280 Calibrated) -->
+        <div class="glass-card metric-card primary-temp" id="tempCard">
+          <div class="card-glow-layer"></div>
+          <div class="card-header">
+            <div class="card-icon temp-icon">
+              <i class="fa-solid fa-temperature-half"></i>
+            </div>
+            <div class="card-title-wrap">
+              <span class="sensor-tag">DHT11 & BMP280</span>
+              <h3>Ambient Temperature</h3>
+            </div>
+            <div class="card-trend positive" id="tempTrend">
+              <i class="fa-solid fa-arrow-trend-up"></i>
+              <span>+0.4°</span>
+            </div>
+          </div>
+
+          <div class="card-body-primary">
+            <div class="large-value-display">
+              <span class="metric-num" id="tempValue">26.8</span>
+              <span class="metric-unit">°C</span>
+            </div>
+            <div class="gauge-container">
+              <svg class="circular-gauge" viewBox="0 0 100 100">
+                <circle class="gauge-bg" cx="50" cy="50" r="42" />
+                <circle class="gauge-fill temp-fill" id="tempGauge" cx="50" cy="50" r="42" />
+              </svg>
+              <div class="gauge-center-text" id="tempFahrenheit">80.2°F</div>
+            </div>
+          </div>
+
+          <div class="card-footer-stats">
+            <div class="stat-item">
+              <span class="stat-label">Min Today</span>
+              <span class="stat-val" id="tempMin">21.4°C</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-label">Max Today</span>
+              <span class="stat-val" id="tempMax">31.2°C</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-label">Feels Like</span>
+              <span class="stat-val" id="tempFeels">28.1°C</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 2: HUMIDITY (DHT11) -->
+        <div class="glass-card metric-card primary-humidity" id="humidityCard">
+          <div class="card-glow-layer"></div>
+          <div class="card-header">
+            <div class="card-icon humidity-icon">
+              <i class="fa-solid fa-droplet"></i>
+            </div>
+            <div class="card-title-wrap">
+              <span class="sensor-tag">DHT11 SENSOR</span>
+              <h3>Relative Humidity</h3>
+            </div>
+            <div class="card-trend neutral" id="humidityTrend">
+              <i class="fa-solid fa-minus"></i>
+              <span>Steady</span>
+            </div>
+          </div>
+
+          <div class="card-body-primary">
+            <div class="large-value-display">
+              <span class="metric-num" id="humidityValue">58</span>
+              <span class="metric-unit">%</span>
+            </div>
+            <div class="gauge-container">
+              <svg class="circular-gauge" viewBox="0 0 100 100">
+                <circle class="gauge-bg" cx="50" cy="50" r="42" />
+                <circle class="gauge-fill humidity-fill" id="humidityGauge" cx="50" cy="50" r="42" />
+              </svg>
+              <div class="gauge-center-text" id="comfortLevel">Comfortable</div>
+            </div>
+          </div>
+
+          <div class="card-footer-stats">
+            <div class="stat-item">
+              <span class="stat-label">Dew Point</span>
+              <span class="stat-val" id="dewPoint">17.8°C</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-label">Abs Humidity</span>
+              <span class="stat-val" id="absHumidity">14.6 g/m³</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-label">Mold Risk</span>
+              <span class="stat-val status-green" id="moldRisk">Low</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 3: BAROMETRIC PRESSURE & ALTITUDE (BMP280) -->
+        <div class="glass-card metric-card primary-pressure" id="pressureCard">
+          <div class="card-glow-layer"></div>
+          <div class="card-header">
+            <div class="card-icon pressure-icon">
+              <i class="fa-solid fa-gauge-high"></i>
+            </div>
+            <div class="card-title-wrap">
+              <span class="sensor-tag">BMP280 PRECISION</span>
+              <h3>Barometric Pressure</h3>
+            </div>
+            <div class="card-trend positive" id="pressureTrend">
+              <i class="fa-solid fa-sun"></i>
+              <span>Stable High</span>
+            </div>
+          </div>
+
+          <div class="card-body-primary">
+            <div class="large-value-display">
+              <span class="metric-num" id="pressureValue">1013.2</span>
+              <span class="metric-unit">hPa</span>
+            </div>
+            <div class="gauge-container">
+              <svg class="circular-gauge" viewBox="0 0 100 100">
+                <circle class="gauge-bg" cx="50" cy="50" r="42" />
+                <circle class="gauge-fill pressure-fill" id="pressureGauge" cx="50" cy="50" r="42" />
+              </svg>
+              <div class="gauge-center-text" id="pressureMmHg">759.9 mmHg</div>
+            </div>
+          </div>
+
+          <div class="card-footer-stats">
+            <div class="stat-item">
+              <span class="stat-label">Est. Altitude</span>
+              <span class="stat-val" id="altitudeValue">112 m</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-label">Forecast</span>
+              <span class="stat-val" id="baroForecast">Clear Skies</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-label">Sea Level Equiv</span>
+              <span class="stat-val" id="seaLevelPres">1014.1 hPa</span>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- MIDDLE ROW: INTERACTIVE VIRTUAL OLED HUD TWIN (MATCHING PHYSICAL HARDWARE) -->
+      <section class="oled-twin-section glass-card">
+        <div class="oled-card-header">
+          <div class="oled-title-wrap">
+            <div class="badge-tech"><i class="fa-solid fa-microchip"></i> HARDWARE DIGITAL TWIN</div>
+            <h2>SSD1306 0.96" OLED Live HUD</h2>
+            <p class="oled-sub">Real-time simulation of physical ESP32 screen states and Touch Sensor trigger flow.</p>
+          </div>
+
+          <div class="oled-controls-bar">
+            <div class="oled-screen-status">
+              <span>Active Screen:</span>
+              <strong id="oledScreenLabel" class="screen-highlight">SCREEN 1 (Time & Date)</strong>
+            </div>
+
+            <!-- Virtual Touch Sensor Button -->
+            <button class="touch-trigger-btn" id="virtualTouchBtn" title="Click to Simulate Hardware Touch Sensor">
+              <div class="touch-ripple"></div>
+              <i class="fa-solid fa-fingerprint"></i>
+              <span>TOUCH SENSOR (CLICK)</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="oled-twin-layout">
+          
+          <!-- Physical Hardware Frame Replica -->
+          <div class="oled-hardware-bezel">
+            <div class="bezel-top-labels">
+              <span class="bezel-label">GND</span>
+              <span class="bezel-label">VCC</span>
+              <span class="bezel-label">SCL</span>
+              <span class="bezel-label">SDA</span>
+            </div>
+            
+            <!-- Monochromatic 128x64 OLED Glass Canvas -->
+            <div class="oled-display-glass" id="oledDisplayGlass">
+              <div class="oled-scanlines"></div>
+              
+              <!-- STATE 0: BOOT / LOADING SCREEN -->
+              <div class="oled-screen-view" id="oledBootScreen">
+                <div class="oled-brand-row">
+                  <span class="oled-text-sm">KARMAKAR INDUSTRY</span>
+                </div>
+                <div class="oled-loading-center">
+                  <div class="oled-loading-title">LOADING...</div>
+                  <div class="oled-progress-bar-box">
+                    <div class="oled-progress-fill" id="oledBootFill"></div>
+                  </div>
+                  <div class="oled-percent-text" id="oledBootPercent">20%</div>
+                </div>
+                <div class="oled-footer-row">
+                  <span>ESP32 INIT OK</span>
+                </div>
+              </div>
+
+              <!-- STATE 1: SCREEN 1 (TIME & DATE HUD) -->
+              <div class="oled-screen-view active" id="oledScreen1">
+                <div class="oled-header-icons">
+                  <span class="oled-wifi-icon"><i class="fa-solid fa-wifi"></i></span>
+                  <span class="oled-station-badge">AERO-HUD</span>
+                  <span class="oled-moon-icon"><i class="fa-solid fa-moon"></i></span>
+                </div>
+                <div class="oled-time-display" id="oledTimeText">
+                  21:46:56
+                </div>
+                <div class="oled-date-display" id="oledDateText">
+                  WED, 19 AUG 2026
+                </div>
+                <div class="oled-nav-hint">
+                  <span>[ TOUCH FOR WEATHER ]</span>
+                </div>
+              </div>
+
+              <!-- STATE 2: SCREEN 2 (WEATHER SENSOR HUD) -->
+              <div class="oled-screen-view" id="oledScreen2">
+                <div class="oled-header-icons">
+                  <span class="oled-wifi-icon"><i class="fa-solid fa-wifi"></i></span>
+                  <span class="oled-station-badge">WEATHER HUD</span>
+                  <span class="oled-timer-countdown" id="oledAutoReturnTimer">10s</span>
+                </div>
+                <div class="oled-weather-grid">
+                  <div class="oled-weather-row">
+                    <span class="ow-label">TEMP:</span>
+                    <span class="ow-val" id="oledTempText">26.8 °C</span>
+                  </div>
+                  <div class="oled-weather-row">
+                    <span class="ow-label">HUMI:</span>
+                    <span class="ow-val" id="oledHumiText">58 %</span>
+                  </div>
+                  <div class="oled-weather-row">
+                    <span class="ow-label">PRES:</span>
+                    <span class="ow-val" id="oledPresText">1013.2 hPa</span>
+                  </div>
+                </div>
+                <div class="oled-nav-hint pulse-subtle">
+                  <span>[ 10s AUTO-RETURN TO TIME ]</span>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- Bezel Bottom Screws & Pins -->
+            <div class="bezel-bottom">
+              <span class="screw top-left"></span>
+              <span class="screw top-right"></span>
+              <span class="screw bot-left"></span>
+              <span class="screw bot-right"></span>
+              <span class="oled-model-text">0.96" I2C OLED (SSD1306 128x64)</span>
+            </div>
+          </div>
+
+          <!-- Flow Explanation & Interaction Panel -->
+          <div class="oled-flow-explainer">
+            <div class="flow-step-card active" id="flowStep1">
+              <div class="step-badge">1</div>
+              <div class="step-content">
+                <h4>HUD Screen 1 (Default)</h4>
+                <p>Displays NTP accurate time and date with real-time Wi-Fi connectivity indicator.</p>
+              </div>
+            </div>
+
+            <div class="flow-arrow">
+              <i class="fa-solid fa-arrow-down"></i>
+              <span>Touch Click</span>
+            </div>
+
+            <div class="flow-step-card" id="flowStep2">
+              <div class="step-badge">2</div>
+              <div class="step-content">
+                <h4>HUD Screen 2 (Sensors)</h4>
+                <p>Shows live readings from DHT11 & BMP280: Temperature, Humidity, and Pressure.</p>
+                <div class="timeout-chip">
+                  <i class="fa-solid fa-stopwatch"></i> Auto-reverts after 10s of no touch
+                </div>
+              </div>
+            </div>
+
+            <!-- Demo Mode Selector -->
+            <div class="demo-controls-box">
+              <span class="box-label">SIMULATOR CONTROLS:</span>
+              <div class="btn-group">
+                <button class="pill-action-btn" id="triggerRebootBtn">
+                  <i class="fa-solid fa-rotate-right"></i> Boot Animation
+                </button>
+                <button class="pill-action-btn" id="quickToggleScreenBtn">
+                  <i class="fa-solid fa-toggle-on"></i> Toggle Screen
+                </button>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+      </section>
+
+      <!-- BOTTOM ROW: HISTORICAL TELEMETRY CHARTS & ATMOSPHERIC INSIGHTS -->
+      <section class="analytics-grid">
+        
+        <!-- Live Telemetry Stream Chart -->
+        <div class="glass-card chart-card">
+          <div class="chart-header">
+            <div class="chart-title-wrap">
+              <div class="chart-badge"><i class="fa-solid fa-chart-line"></i> LIVE TELEMETRY</div>
+              <h3>Atmospheric Trend Analysis</h3>
+            </div>
+            
+            <div class="chart-tabs">
+              <button class="chart-tab active" data-metric="temperature">Temperature</button>
+              <button class="chart-tab" data-metric="humidity">Humidity</button>
+              <button class="chart-tab" data-metric="pressure">Pressure</button>
+            </div>
+          </div>
+
+          <div class="chart-canvas-wrapper">
+            <canvas id="telemetryChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Atmospheric Comfort & Environmental Health Card -->
+        <div class="glass-card env-insights-card">
+          <div class="card-header">
+            <div class="card-icon insight-icon">
+              <i class="fa-solid fa-leaf"></i>
+            </div>
+            <div class="card-title-wrap">
+              <span class="sensor-tag">AI COMFORT INDEX</span>
+              <h3>Environmental Health</h3>
+            </div>
+          </div>
+
+          <div class="insights-list">
+            <div class="insight-row">
+              <div class="insight-meta">
+                <span class="ins-name">Thermal Comfort</span>
+                <span class="ins-badge optimal" id="comfortBadge">Optimal (26.8°C)</span>
+              </div>
+              <div class="progress-bar-thin">
+                <div class="progress-fill optimal-fill" style="width: 85%;"></div>
+              </div>
+            </div>
+
+            <div class="insight-row">
+              <div class="insight-meta">
+                <span class="ins-name">Humidity Balance</span>
+                <span class="ins-badge optimal" id="humidityBalanceBadge">Ideal (58%)</span>
+              </div>
+              <div class="progress-bar-thin">
+                <div class="progress-fill optimal-fill" style="width: 78%;"></div>
+              </div>
+            </div>
+
+            <div class="insight-row">
+              <div class="insight-meta">
+                <span class="ins-name">Barometric Stability</span>
+                <span class="ins-badge optimal" id="baroStabilityBadge">High Pressure (+1013)</span>
+              </div>
+              <div class="progress-bar-thin">
+                <div class="progress-fill optimal-fill" style="width: 92%;"></div>
+              </div>
+            </div>
+
+            <div class="insight-row">
+              <div class="insight-meta">
+                <span class="ins-name">Estimated Air Density</span>
+                <span class="ins-val-bold" id="airDensityVal">1.177 kg/m³</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="hardware-status-box">
+            <div class="hw-chip"><i class="fa-solid fa-microchip"></i> ESP32: 240MHz</div>
+            <div class="hw-chip"><i class="fa-solid fa-wifi"></i> WiFi: -52 dBm</div>
+            <div class="hw-chip"><i class="fa-solid fa-clock-rotate-left"></i> NTP: SYNCED</div>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="glass-footer">
+      <div class="footer-left">
+        <p>© 2026 Karmakar Industry & Rudra Workshop • IoT Weather Station Project</p>
+      </div>
+      <div class="footer-right">
+        <span>Hardware: ESP32 + DHT11 + BMP280 + SSD1306</span>
+        <a href="#settings" class="footer-link" id="footerConfigLink"><i class="fa-solid fa-gear"></i> Station Config</a>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- ESP32 Hardware Connector Modal -->
+  <div class="modal-backdrop" id="settingsModal">
+    <div class="glass-card modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-network-wired"></i>
+          <h3>ESP32 Hardware Connection</h3>
+        </div>
+        <button class="close-modal-btn" id="closeModalBtn" aria-label="Close modal">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <p class="modal-intro">Connect this dashboard directly to your ESP32 IP address over your local Wi-Fi or test with live simulation.</p>
+        
+        <div class="form-group">
+          <label for="connectionMode">Data Source Mode</label>
+          <select id="connectionMode" class="glass-input">
+            <option value="sim">Virtual Simulation Engine (Live Mock)</option>
+            <option value="esp32_rest">ESP32 REST API (HTTP Polling)</option>
+            <option value="esp32_ws">ESP32 WebSockets (Ultra-Low Latency)</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="espIpGroup" style="display: none;">
+          <label for="espIpInput">ESP32 IP Address or Hostname</label>
+          <input type="text" id="espIpInput" class="glass-input" placeholder="e.g. 192.168.1.150 or esp32-weather.local" value="192.168.1.150">
+          <span class="field-hint">Ensure your device is on the same Wi-Fi network as the ESP32.</span>
+        </div>
+
+        <div class="form-group" id="refreshRateInputGroup">
+          <label for="refreshRateInput">Polling / Refresh Rate (ms)</label>
+          <input type="number" id="refreshRateInput" class="glass-input" value="2000" min="500" max="10000" step="500">
+        </div>
+
+        <div class="connection-test-result" id="connTestResult"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="glass-btn secondary" id="testConnBtn">
+          <i class="fa-solid fa-vial"></i> Test Link
+        </button>
+        <button class="glass-btn primary" id="saveConnBtn">
+          <i class="fa-solid fa-check"></i> Save & Connect
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audio Element for Nature Ambience -->
+  <audio id="natureAudio" loop preload="none">
+    <source src="https://cdn.pixabay.com/download/audio/2022/05/16/audio_c97a829e7c.mp3?filename=forest-with-small-river-birds-and-nature-field-recording-6735.mp3" type="audio/mpeg">
+  </audio>
+
+  <!-- Application Logic -->
+  <script src="app.js"></script>
 </body>
 </html>
