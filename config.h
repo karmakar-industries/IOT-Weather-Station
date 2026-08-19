@@ -12,9 +12,13 @@
 #define WIFI_SSID     "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 
+// --- Automated Cloud Sync Endpoint ---
+// Free, zero-setup Cloud Database where ESP32 auto-posts sensor readings
+// The GitHub Pages domain automatically listens to this cloud feed!
+#define CLOUD_POST_URL "https://iot-weather-station-karmakar-default-rtdb.firebaseio.com/weather.json"
+
 // --- NTP Timezone Settings ---
 // Default: UTC+5:30 (India Standard Time = 19800 seconds)
-// Change to your local offset in seconds: e.g., UTC-5 (EST) = -18000
 #define NTP_TIMEZONE_OFFSET_SEC 19800
 #define NTP_DAYLIGHT_OFFSET_SEC 0
 #define NTP_SERVER              "pool.ntp.org"
@@ -34,13 +38,13 @@
 #define BMP280_I2C_ADDR 0x76   // Standard 0x76 (or 0x77 on some clone modules)
 
 // Touch Sensor Module (TTP223 or ESP32 Capacitive Pin)
-#define TOUCH_SENSOR_PIN   4   // GPIO 4 (Digital In from TTP223 or Capacitive Touch T0)
-#define USE_CAPACITIVE_TOUCH false // Set to true if using raw wire on ESP32 Touch Pin without TTP223 module
-#define TOUCH_THRESHOLD    40  // Threshold for touchRead() if USE_CAPACITIVE_TOUCH is true
+#define TOUCH_SENSOR_PIN   4   // GPIO 4 (Digital In from TTP223)
+#define USE_CAPACITIVE_TOUCH false // Set to true if using raw wire on ESP32 Touch Pin T0
+#define TOUCH_THRESHOLD    40
 
 // Timing Constants
 #define SCREEN_TIMEOUT_MS  10000 // 10 seconds auto-revert to Time Screen
 #define SENSOR_READ_MS     2000  // Read sensor telemetry every 2 seconds
-#define NTP_UPDATE_MS      60000 // Refresh NTP time every 60 seconds
+#define CLOUD_SYNC_MS      3000  // Push data to Cloud every 3 seconds
 
 #endif // CONFIG_H

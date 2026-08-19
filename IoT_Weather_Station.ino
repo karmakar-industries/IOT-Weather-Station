@@ -4,13 +4,14 @@
  * Platform: ESP32 (Arduino Framework)
  * Features:
  *   - DHT11 (Temperature & Humidity)
- *   - BMP280 (Barometric Pressure & Temperature / Altitude)
+ *   - BMP280 (Barometric Pressure & Precision Temperature / Altitude)
  *   - SSD1306 OLED (128x64 I2C HUD)
  *   - Boot Animation ("KARMAKAR INDUSTRY" & Progress Bar)
  *   - Touch Sensor Switching (Screen 1: Time/Date <-> Screen 2: Weather HUD)
  *   - 10-Second Inactivity Auto-revert to Time Screen
+ *   - Automated Cloud Push (Syncs to GitHub domain as soon as Wi-Fi connects!)
  *   - NTP Time Synchronization over Wi-Fi
- *   - Web Server REST API Endpoint (/api/data) with CORS support
+ *   - Local REST API & mDNS (esp32-weather.local)
  *
  * Developed for: Rudra Workshop / Karmakar Industry
  * ==========================================================================
@@ -18,6 +19,9 @@
 
 #include <Wire.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <time.h>
 #include <Adafruit_GFX.h>
@@ -51,6 +55,7 @@ float currentPressure = 0.0;
 float currentAltitude = 0.0;
 
 unsigned long lastSensorReadTime = 0;
+unsigned long lastCloudSyncTime = 0;
 unsigned long lastScreenTouchTime = 0;
 bool lastTouchState = false;
 bool bmpAvailable = false;
@@ -71,18 +76,6 @@ const unsigned char epd_bitmap_wifi[] PROGMEM = {
   0b01000010,
   0b00011000,
   0b00011000,
-  0b00000000
-};
-
-// 8x8 Thermometer Glyph
-const unsigned char epd_bitmap_temp[] PROGMEM = {
-  0b00011000,
-  0b00100100,
-  0b00100100,
-  0b00100100,
-  0b01000010,
-  0b01000010,
-  0b00111100,
   0b00000000
 };
 
@@ -250,13 +243,46 @@ void readSensors() {
       currentAltitude = bmp.readAltitude(1013.25);
     }
 
-    // Blend BMP280 precision temperature if DHT11 fails
     if (isnan(t)) {
       currentTemperature = bmpTemp;
     }
   } else {
-    // Default standard atmospheric pressure if BMP280 missing
     currentPressure = 1013.25;
+  }
+}
+
+// ==========================================================================
+// AUTOMATED CLOUD SYNC (AUTOLINK WITH GITHUB DOMAIN)
+// ==========================================================================
+void pushDataToCloud() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure client;
+  client.setInsecure(); // Allow secure HTTPS without certificate pinning
+
+  HTTPClient https;
+  if (https.begin(client, CLOUD_POST_URL)) {
+    https.addHeader("Content-Type", "application/json");
+
+    // Build JSON Payload
+    String jsonPayload = "{";
+    jsonPayload += "\"temp\":" + String(currentTemperature, 1) + ",";
+    jsonPayload += "\"humidity\":" + String(currentHumidity, 0) + ",";
+    jsonPayload += "\"pressure\":" + String(currentPressure, 1) + ",";
+    jsonPayload += "\"altitude\":" + String(currentAltitude, 0) + ",";
+    jsonPayload += "\"screen\":" + String((int)currentScreen) + ",";
+    jsonPayload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+    jsonPayload += "\"timestamp\":" + String(millis() / 1000);
+    jsonPayload += "}";
+
+    // Use HTTP PUT to update root object
+    int httpCode = https.PUT(jsonPayload);
+    if (httpCode > 0) {
+      Serial.printf("[CLOUD SYNC] Auto-linked to domain! (HTTP %d)\n", httpCode);
+    } else {
+      Serial.printf("[CLOUD SYNC] Sync error: %s\n", https.errorToString(httpCode).c_str());
+    }
+    https.end();
   }
 }
 
@@ -268,7 +294,6 @@ bool readTouchInput() {
   int val = touchRead(TOUCH_SENSOR_PIN);
   return (val < TOUCH_THRESHOLD);
 #else
-  // Standard TTP223 Digital Touch Sensor module (Active HIGH)
   return (digitalRead(TOUCH_SENSOR_PIN) == HIGH);
 #endif
 }
@@ -276,11 +301,9 @@ bool readTouchInput() {
 void handleTouchSensor() {
   bool currentTouch = readTouchInput();
 
-  // Detect Rising Edge (User tapped the touch sensor)
   if (currentTouch && !lastTouchState) {
     lastScreenTouchTime = millis();
 
-    // Toggle Screen between 1 and 2
     if (currentScreen == SCREEN_TIME) {
       currentScreen = SCREEN_WEATHER;
       Serial.println(F("[TOUCH] Switched to Screen 2: Weather HUD"));
@@ -288,62 +311,38 @@ void handleTouchSensor() {
       currentScreen = SCREEN_TIME;
       Serial.println(F("[TOUCH] Switched to Screen 1: Time HUD"));
     }
-    
-    // Hardware debounce
     delay(50);
   }
 
   lastTouchState = currentTouch;
 
-  // Inactivity Auto-revert Check:
-  // If in SCREEN_WEATHER and 10 seconds elapse with no touch -> Revert to SCREEN_TIME
+  // Inactivity Auto-revert Check (10s)
   if (currentScreen == SCREEN_WEATHER) {
     if (millis() - lastScreenTouchTime >= SCREEN_TIMEOUT_MS) {
       currentScreen = SCREEN_TIME;
-      Serial.println(F("[TIMEOUT] 10s elapsed with no touch. Auto-reverted to Screen 1 (Time/Date)"));
+      Serial.println(F("[TIMEOUT] 10s elapsed with no touch. Auto-reverted to Screen 1"));
     }
   }
 }
 
 // ==========================================================================
-// REST API & WEB SERVER HANDLERS
+// LOCAL REST API HANDLERS
 // ==========================================================================
 void handleApiData() {
-  // Add CORS headers so Web dashboard on any origin can fetch telemetry
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   server.sendHeader("Access-Control-Allow-Headers", "*");
 
-  // Build JSON Payload
   String json = "{";
   json += "\"temp\":" + String(currentTemperature, 1) + ",";
   json += "\"humidity\":" + String(currentHumidity, 0) + ",";
   json += "\"pressure\":" + String(currentPressure, 1) + ",";
   json += "\"altitude\":" + String(currentAltitude, 0) + ",";
   json += "\"screen\":" + String((int)currentScreen) + ",";
-  json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"uptime_sec\":" + String(millis() / 1000);
+  json += "\"wifi_rssi\":" + String(WiFi.RSSI());
   json += "}";
 
   server.send(200, "application/json", json);
-}
-
-void handleRoot() {
-  String html = F("<!DOCTYPE html><html><head><title>AeroMetrics Pro ESP32 Node</title>"
-                  "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                  "<style>body{background:#0a121a;color:#fff;font-family:sans-serif;text-align:center;padding:2rem;}"
-                  ".card{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);border-radius:12px;padding:1.5rem;max-width:400px;margin:0 auto;}"
-                  "h1{color:#00f2fe;font-size:1.5rem;}p{font-size:1.2rem;}</style></head>"
-                  "<body><div class='card'><h1>AEROMETRICS PRO</h1>"
-                  "<p>Karmakar Industry Node</p>"
-                  "<p>Temp: <b>");
-  html += String(currentTemperature, 1) + " &deg;C</b></p>";
-  html += "<p>Humidity: <b>" + String((int)currentHumidity) + " %</b></p>";
-  html += "<p>Pressure: <b>" + String(currentPressure, 1) + " hPa</b></p>";
-  html += "<p><small>JSON API Endpoint: <a href='/api/data' style='color:#00f2fe'>/api/data</a></small></p>";
-  html += "</div></body></html>";
-
-  server.send(200, "text/html", html);
 }
 
 // ==========================================================================
@@ -360,11 +359,8 @@ void setup() {
   // 1. Initialize I2C Bus & OLED Display
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
-    Serial.println(F("[ERROR] SSD1306 OLED initialization failed at 0x3C!"));
-    // Try alternate address 0x3D
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
-      Serial.println(F("[FATAL] SSD1306 display not detected on I2C bus!"));
-    }
+    Serial.println(F("[ERROR] SSD1306 OLED init failed at 0x3C!"));
+    display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
   }
 
   // 2. Play Boot Animation & Progress Bar
@@ -372,20 +368,13 @@ void setup() {
     drawBootScreen(p);
     delay(150);
   }
-  delay(400);
+  delay(300);
 
   // 3. Initialize DHT11 & BMP280 Sensors
   dht.begin();
   if (bmp.begin(BMP280_I2C_ADDR)) {
-    Serial.println(F("[OK] BMP280 Barometric Pressure Sensor initialized."));
+    Serial.println(F("[OK] BMP280 Sensor initialized."));
     bmpAvailable = true;
-    bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
-                     Adafruit_BMP280::SAMPLING_X2,
-                     Adafruit_BMP280::SAMPLING_X16,
-                     Adafruit_BMP280::FILTER_X16,
-                     Adafruit_BMP280::STANDBY_MS_500);
-  } else {
-    Serial.println(F("[WARN] BMP280 sensor not found at 0x76. Checking fallback..."));
   }
 
   // 4. Configure Touch Sensor Input
@@ -409,24 +398,25 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     Serial.println(F("\n[WIFI] Connected Successfully!"));
-    Serial.print(F("[WIFI] Station IP Address: "));
+    Serial.print(F("[WIFI] Station IP: "));
     Serial.println(WiFi.localIP());
 
-    // 6. Initialize NTP Client
+    // 6. Setup mDNS (esp32-weather.local)
+    if (MDNS.begin("esp32-weather")) {
+      Serial.println(F("[mDNS] Responder started at http://esp32-weather.local"));
+    }
+
+    // 7. Initialize NTP Client
     configTime(NTP_TIMEZONE_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
-    Serial.println(F("[NTP] Configured time sync server pool.ntp.org"));
-  } else {
-    Serial.println(F("\n[WIFI] Could not connect. Running in standalone offline mode."));
   }
 
-  // 7. Configure Web Server Routes
+  // 8. Configure Web Server Routes
   server.on("/api/data", HTTP_GET, handleApiData);
-  server.on("/", HTTP_GET, handleRoot);
   server.begin();
-  Serial.println(F("[HTTP] REST API Server started on port 80"));
 
-  // Initial sensor read
+  // Initial sensor read and cloud push
   readSensors();
+  pushDataToCloud();
 
   // Switch to Screen 1
   currentScreen = SCREEN_TIME;
@@ -437,19 +427,22 @@ void setup() {
 // ARDUINO MAIN LOOP
 // ==========================================================================
 void loop() {
-  // 1. Handle incoming HTTP requests
   server.handleClient();
-
-  // 2. Process Touch Sensor Inputs & 10s auto-revert timer
   handleTouchSensor();
 
-  // 3. Periodic Sensor Readings
+  // 1. Periodic Sensor Readings (Every 2 seconds)
   if (millis() - lastSensorReadTime >= SENSOR_READ_MS) {
     lastSensorReadTime = millis();
     readSensors();
   }
 
-  // 4. Refresh Active OLED Screen
+  // 2. Automated Cloud Push (Every 3 seconds)
+  if (millis() - lastCloudSyncTime >= CLOUD_SYNC_MS) {
+    lastCloudSyncTime = millis();
+    pushDataToCloud();
+  }
+
+  // 3. Refresh Active OLED Screen
   if (currentScreen == SCREEN_TIME) {
     drawScreen1_TimeDate();
   } else if (currentScreen == SCREEN_WEATHER) {

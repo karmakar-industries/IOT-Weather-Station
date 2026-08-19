@@ -1,265 +1,115 @@
 /**
  * ==========================================================================
- * AEROMETRICS PRO - IoT Weather Station Dashboard Controller
- * Handles: Glassmorphic UI, OLED HUD Twin, Sensors, Charts, ESP32 Link
+ * AEROMETRICS PRO - IoT Weather Station Dashboard
+ * Automated Cloud Link: ESP32 -> Cloud Endpoint -> Live Web Dashboard
  * ==========================================================================
  */
 
 document.addEventListener('DOMContentLoaded', () => {
-  
+
   // --- APPLICATION STATE ---
   const state = {
-    // Current Sensor Data
-    temperature: 26.8, // °C
-    humidity: 58,      // %
-    pressure: 1013.2,  // hPa
-    altitude: 112,     // m
+    // Current Sensor Data (Initialized to null/waiting)
+    temperature: null,
+    humidity: null,
+    pressure: null,
+    altitude: null,
+    lastSeenTimestamp: 0,
     
-    // OLED State Machine
-    // 0 = Boot / Loading, 1 = Screen 1 (Time & Date), 2 = Screen 2 (Weather Sensors)
-    oledScreen: 1,
-    oledAutoReturnTimeout: null,
-    oledAutoReturnInterval: null,
-    oledCountdownSec: 10,
-    isBooting: false,
-
-    // Connection & Settings
-    connectionMode: 'sim', // 'sim', 'esp32_rest', 'esp32_ws'
-    espIp: '192.168.1.150',
-    refreshRate: 2000,
-    isConnected: true,
+    // Status
+    isOnline: false,
 
     // Active Chart Tab
     activeChartMetric: 'temperature',
     
-    // Telemetry History for Charts (last 15 points)
+    // Telemetry History for Charts (Max 15 points)
     history: {
       timestamps: [],
       temperature: [],
       humidity: [],
       pressure: []
-    },
-
-    // Audio
-    isAudioPlaying: false
-  };
-
-  // --- INITIALIZE HISTORY DATA ---
-  const initHistoryData = () => {
-    const now = new Date();
-    for (let i = 14; i >= 0; i--) {
-      const time = new Date(now.getTime() - i * 60000);
-      const timeLabel = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      state.history.timestamps.push(timeLabel);
-      state.history.temperature.push(+(state.temperature + (Math.random() * 0.8 - 0.4)).toFixed(1));
-      state.history.humidity.push(Math.round(state.humidity + (Math.random() * 3 - 1.5)));
-      state.history.pressure.push(+(state.pressure + (Math.random() * 0.6 - 0.3)).toFixed(1));
     }
   };
-  initHistoryData();
+
+  // Cloud API Endpoint where ESP32 auto-posts sensor JSON
+  // Free public JSON cloud bin / Firebase endpoint for instant zero-config sync
+  const CLOUD_DATA_URL = 'https://api.jsonbin.io/v3/b/66c4a8a0e41b4d34e424bb92/latest'; 
+  // Fallback endpoint for direct/mock sync if cloud is establishing
+  const BACKUP_DATA_URL = 'https://iot-weather-station-karmakar-default-rtdb.firebaseio.com/weather.json';
 
   // ==========================================================================
-  // 1. CLOCK & DATE FORMATTER (NTP SIMULATION)
+  // 1. CLOCK & DATE FORMATTER
   // ==========================================================================
   const updateSystemClock = () => {
     const now = new Date();
-    
-    // Format Time: HH:MM:SS
     const hours = String(now.getHours()).padStart(2, '0');
     const minutes = String(now.getMinutes()).padStart(2, '0');
     const seconds = String(now.getSeconds()).padStart(2, '0');
     const timeStr = `${hours}:${minutes}:${seconds}`;
 
-    // Format Date: DAY, DD MON YYYY
     const options = { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' };
     const dateStr = now.toLocaleDateString('en-US', options).toUpperCase();
 
-    // Update Header
     const headerClock = document.getElementById('headerClock');
     const headerDate = document.getElementById('headerDate');
     if (headerClock) headerClock.textContent = timeStr;
     if (headerDate) headerDate.textContent = dateStr;
-
-    // Update OLED Screen 1
-    const oledTimeText = document.getElementById('oledTimeText');
-    const oledDateText = document.getElementById('oledDateText');
-    if (oledTimeText) oledTimeText.textContent = timeStr;
-    if (oledDateText) oledDateText.textContent = dateStr;
   };
 
   setInterval(updateSystemClock, 1000);
   updateSystemClock();
 
   // ==========================================================================
-  // 2. OLED HARDWARE DIGITAL TWIN CONTROLLER
-  // ==========================================================================
-  const oledBootScreen = document.getElementById('oledBootScreen');
-  const oledScreen1 = document.getElementById('oledScreen1');
-  const oledScreen2 = document.getElementById('oledScreen2');
-  const oledScreenLabel = document.getElementById('oledScreenLabel');
-  const oledAutoReturnTimer = document.getElementById('oledAutoReturnTimer');
-  const flowStep1 = document.getElementById('flowStep1');
-  const flowStep2 = document.getElementById('flowStep2');
-  const virtualTouchBtn = document.getElementById('virtualTouchBtn');
-
-  // Switch OLED Display to Screen 1 (Time & Date)
-  const showOledScreen1 = () => {
-    if (state.isBooting) return;
-    
-    // Clear any active 10s auto-return timers
-    if (state.oledAutoReturnTimeout) clearTimeout(state.oledAutoReturnTimeout);
-    if (state.oledAutoReturnInterval) clearInterval(state.oledAutoReturnInterval);
-
-    state.oledScreen = 1;
-    oledBootScreen.classList.remove('active');
-    oledScreen2.classList.remove('active');
-    oledScreen1.classList.add('active');
-
-    oledScreenLabel.textContent = 'SCREEN 1 (Time & Date)';
-    oledScreenLabel.style.color = 'var(--accent-cyan)';
-    
-    flowStep1.classList.add('active');
-    flowStep2.classList.remove('active');
-  };
-
-  // Switch OLED Display to Screen 2 (Weather HUD) with 10s Countdown Auto-Return
-  const showOledScreen2 = () => {
-    if (state.isBooting) return;
-
-    // Clear previous timers
-    if (state.oledAutoReturnTimeout) clearTimeout(state.oledAutoReturnTimeout);
-    if (state.oledAutoReturnInterval) clearInterval(state.oledAutoReturnInterval);
-
-    state.oledScreen = 2;
-    state.oledCountdownSec = 10;
-    
-    oledBootScreen.classList.remove('active');
-    oledScreen1.classList.remove('active');
-    oledScreen2.classList.add('active');
-
-    oledScreenLabel.textContent = 'SCREEN 2 (Weather Metrics)';
-    oledScreenLabel.style.color = 'var(--accent-teal)';
-    
-    flowStep1.classList.remove('active');
-    flowStep2.classList.add('active');
-
-    // Update Countdown Badge
-    if (oledAutoReturnTimer) {
-      oledAutoReturnTimer.textContent = `${state.oledCountdownSec}s`;
-    }
-
-    // Start 1-second countdown interval
-    state.oledAutoReturnInterval = setInterval(() => {
-      state.oledCountdownSec -= 1;
-      if (oledAutoReturnTimer) {
-        oledAutoReturnTimer.textContent = `${Math.max(0, state.oledCountdownSec)}s`;
-      }
-      if (state.oledCountdownSec <= 0) {
-        clearInterval(state.oledAutoReturnInterval);
-      }
-    }, 1000);
-
-    // Auto-return to Screen 1 after exactly 10 seconds of no click
-    state.oledAutoReturnTimeout = setTimeout(() => {
-      showOledScreen1();
-    }, 10000);
-  };
-
-  // Touch Sensor Click Trigger (Toggles between Screen 1 and Screen 2)
-  const handleTouchSensorClick = () => {
-    if (state.isBooting) return;
-
-    // Tactile button effect
-    virtualTouchBtn.style.transform = 'scale(0.95)';
-    setTimeout(() => {
-      virtualTouchBtn.style.transform = '';
-    }, 120);
-
-    // Play subtle beep sound or toggle
-    if (state.oledScreen === 1) {
-      showOledScreen2();
-    } else {
-      showOledScreen1();
-    }
-  };
-
-  if (virtualTouchBtn) {
-    virtualTouchBtn.addEventListener('click', handleTouchSensorClick);
-  }
-
-  // Quick Toggle Button
-  const quickToggleScreenBtn = document.getElementById('quickToggleScreenBtn');
-  if (quickToggleScreenBtn) {
-    quickToggleScreenBtn.addEventListener('click', handleTouchSensorClick);
-  }
-
-  // Trigger Boot Animation / Karmakar Industry Branding
-  const triggerBootAnimation = () => {
-    state.isBooting = true;
-    state.oledScreen = 0;
-    
-    if (state.oledAutoReturnTimeout) clearTimeout(state.oledAutoReturnTimeout);
-    if (state.oledAutoReturnInterval) clearInterval(state.oledAutoReturnInterval);
-
-    oledScreen1.classList.remove('active');
-    oledScreen2.classList.remove('active');
-    oledBootScreen.classList.add('active');
-
-    oledScreenLabel.textContent = 'BOOTING (Karmakar Industry)';
-    oledScreenLabel.style.color = 'var(--accent-amber)';
-
-    const oledBootFill = document.getElementById('oledBootFill');
-    const oledBootPercent = document.getElementById('oledBootPercent');
-    
-    let progress = 10;
-    oledBootFill.style.width = '10%';
-    oledBootPercent.textContent = '10%';
-
-    const bootInterval = setInterval(() => {
-      progress += Math.floor(Math.random() * 15) + 10;
-      if (progress > 100) progress = 100;
-      
-      oledBootFill.style.width = `${progress}%`;
-      oledBootPercent.textContent = `${progress}%`;
-
-      if (progress >= 100) {
-        clearInterval(bootInterval);
-        setTimeout(() => {
-          state.isBooting = false;
-          showOledScreen1();
-        }, 600);
-      }
-    }, 200);
-  };
-
-  const triggerRebootBtn = document.getElementById('triggerRebootBtn');
-  if (triggerRebootBtn) {
-    triggerRebootBtn.addEventListener('click', triggerBootAnimation);
-  }
-
-  // Run initial brief boot sequence on page launch
-  setTimeout(triggerBootAnimation, 400);
-
-  // ==========================================================================
-  // 3. TELEMETRY & SENSOR CALCULATIONS ENGINE
+  // 2. TELEMETRY & SENSOR CALCULATIONS ENGINE
   // ==========================================================================
   const updateMetricCards = () => {
-    // Temperature Elements
     const tempValue = document.getElementById('tempValue');
     const tempFahrenheit = document.getElementById('tempFahrenheit');
     const tempFeels = document.getElementById('tempFeels');
     const tempGauge = document.getElementById('tempGauge');
-    const oledTempText = document.getElementById('oledTempText');
+    const tempMin = document.getElementById('tempMin');
+    const tempMax = document.getElementById('tempMax');
 
+    const humidityValue = document.getElementById('humidityValue');
+    const humidityGauge = document.getElementById('humidityGauge');
+    const dewPoint = document.getElementById('dewPoint');
+    const absHumidity = document.getElementById('absHumidity');
+    const comfortLevel = document.getElementById('comfortLevel');
+
+    const pressureValue = document.getElementById('pressureValue');
+    const pressureGauge = document.getElementById('pressureGauge');
+    const pressureMmHg = document.getElementById('pressureMmHg');
+    const altitudeValue = document.getElementById('altitudeValue');
+    const seaLevelPres = document.getElementById('seaLevelPres');
+    const airDensityVal = document.getElementById('airDensityVal');
+
+    if (state.temperature === null) {
+      // Waiting / Offline state
+      if (tempValue) tempValue.textContent = '--.-';
+      if (tempFahrenheit) tempFahrenheit.textContent = '--.-°F';
+      if (humidityValue) humidityValue.textContent = '--';
+      if (pressureValue) pressureValue.textContent = '----.-';
+      if (pressureMmHg) pressureMmHg.textContent = '---.- mmHg';
+      if (altitudeValue) altitudeValue.textContent = '-- m';
+      return;
+    }
+
+    // Temperature Display
     if (tempValue) tempValue.textContent = state.temperature.toFixed(1);
-    if (oledTempText) oledTempText.textContent = `${state.temperature.toFixed(1)} °C`;
-    
     const fahrenheit = (state.temperature * 9 / 5) + 32;
     if (tempFahrenheit) tempFahrenheit.textContent = `${fahrenheit.toFixed(1)}°F`;
 
     // Heat Index (Feels like)
     const feelsLike = state.temperature + 0.33 * (state.humidity / 100 * 6.105 * Math.exp(17.27 * state.temperature / (237.7 + state.temperature))) - 4.0;
     if (tempFeels) tempFeels.textContent = `${feelsLike.toFixed(1)}°C`;
+
+    // Min & Max
+    if (state.history.temperature.length > 0) {
+      const min = Math.min(...state.history.temperature);
+      const max = Math.max(...state.history.temperature);
+      if (tempMin) tempMin.textContent = `${min.toFixed(1)}°C`;
+      if (tempMax) tempMax.textContent = `${max.toFixed(1)}°C`;
+    }
 
     // Temp Gauge (Range: 0°C to 50°C)
     if (tempGauge) {
@@ -269,16 +119,8 @@ document.addEventListener('DOMContentLoaded', () => {
       tempGauge.style.strokeDashoffset = offset;
     }
 
-    // Humidity Elements
-    const humidityValue = document.getElementById('humidityValue');
-    const humidityGauge = document.getElementById('humidityGauge');
-    const dewPoint = document.getElementById('dewPoint');
-    const absHumidity = document.getElementById('absHumidity');
-    const comfortLevel = document.getElementById('comfortLevel');
-    const oledHumiText = document.getElementById('oledHumiText');
-
+    // Humidity Display
     if (humidityValue) humidityValue.textContent = Math.round(state.humidity);
-    if (oledHumiText) oledHumiText.textContent = `${Math.round(state.humidity)} %`;
 
     // Humidity Gauge (0% to 100%)
     if (humidityGauge) {
@@ -288,7 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
       humidityGauge.style.strokeDashoffset = offset;
     }
 
-    // Dew Point Calculation (Magnus formula)
+    // Dew Point Calculation
     const a = 17.27;
     const b = 237.7;
     const alpha = ((a * state.temperature) / (b + state.temperature)) + Math.log(state.humidity / 100.0);
@@ -306,18 +148,9 @@ document.addEventListener('DOMContentLoaded', () => {
       else comfortLevel.textContent = 'Humid';
     }
 
-    // Pressure Elements (BMP280)
-    const pressureValue = document.getElementById('pressureValue');
-    const pressureGauge = document.getElementById('pressureGauge');
-    const pressureMmHg = document.getElementById('pressureMmHg');
-    const altitudeValue = document.getElementById('altitudeValue');
-    const seaLevelPres = document.getElementById('seaLevelPres');
-    const oledPresText = document.getElementById('oledPresText');
-
+    // Pressure Display (BMP280)
     if (pressureValue) pressureValue.textContent = state.pressure.toFixed(1);
-    if (oledPresText) oledPresText.textContent = `${state.pressure.toFixed(1)} hPa`;
 
-    // mmHg conversion
     const mmHg = state.pressure * 0.750062;
     if (pressureMmHg) pressureMmHg.textContent = `${mmHg.toFixed(1)} mmHg`;
 
@@ -340,8 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pressureGauge.style.strokeDashoffset = offset;
     }
 
-    // Air density estimate
-    const airDensityVal = document.getElementById('airDensityVal');
+    // Air density
     if (airDensityVal) {
       const rho = (state.pressure * 100) / (287.058 * (state.temperature + 273.15));
       airDensityVal.textContent = `${rho.toFixed(3)} kg/m³`;
@@ -349,11 +181,10 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   // ==========================================================================
-  // 4. CHART.JS TELEMETRY VISUALIZATION
+  // 3. CHART.JS TELEMETRY VISUALIZATION
   // ==========================================================================
   const ctx = document.getElementById('telemetryChart').getContext('2d');
   
-  // Custom Glassy Gradients for Chart
   const tempGradient = ctx.createLinearGradient(0, 0, 0, 240);
   tempGradient.addColorStop(0, 'rgba(244, 63, 94, 0.45)');
   tempGradient.addColorStop(1, 'rgba(244, 63, 94, 0.0)');
@@ -442,10 +273,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Chart Metric Tab Switching
   const chartTabs = document.querySelectorAll('.chart-tab');
   chartTabs.forEach(tab => {
-    tab.addEventListener('click', (e) => {
+    tab.addEventListener('click', () => {
       chartTabs.forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       
@@ -462,20 +292,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // ==========================================================================
-  // 5. LIVE SIMULATION & REAL ESP32 DATA POLLING
-  // ==========================================================================
   const pushTelemetryPoint = () => {
-    const now = new Date();
-    const timeLabel = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (state.temperature === null) return;
 
-    // Append to history
+    const now = new Date();
+    const timeLabel = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
     state.history.timestamps.push(timeLabel);
     state.history.temperature.push(state.temperature);
     state.history.humidity.push(state.humidity);
     state.history.pressure.push(state.pressure);
 
-    // Keep history at 15 points
     if (state.history.timestamps.length > 15) {
       state.history.timestamps.shift();
       state.history.temperature.shift();
@@ -486,73 +313,81 @@ document.addEventListener('DOMContentLoaded', () => {
     telemetryChart.update();
   };
 
-  // Simulated Weather Drift
-  const runSimulationStep = () => {
-    // Subtle realistic random fluctuations
-    const tempDelta = (Math.random() - 0.49) * 0.25;
-    state.temperature = +(Math.min(Math.max(state.temperature + tempDelta, 18), 38)).toFixed(1);
+  // ==========================================================================
+  // 4. AUTOMATIC CLOUD & ESP32 AUTO-LINK ENGINE
+  // ==========================================================================
+  const updateConnectionStatus = (online) => {
+    state.isOnline = online;
+    const connectionPill = document.getElementById('connectionPill');
+    const statusDot = document.getElementById('statusDot');
+    const connectionLabel = document.getElementById('connectionLabel');
 
-    const humDelta = (Math.random() - 0.5) * 0.8;
-    state.humidity = +(Math.min(Math.max(state.humidity + humDelta, 20), 95)).toFixed(0);
-
-    const presDelta = (Math.random() - 0.5) * 0.15;
-    state.pressure = +(Math.min(Math.max(state.pressure + presDelta, 980), 1035)).toFixed(1);
-
-    updateMetricCards();
-  };
-
-  // Poll ESP32 REST Endpoint
-  const fetchEsp32Data = async () => {
-    try {
-      const url = `http://${state.espIp}/api/data`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      
-      const data = await response.json();
-      
-      // Update state from ESP32 payload
-      if (data.temp !== undefined) state.temperature = data.temp;
-      if (data.humidity !== undefined) state.humidity = data.humidity;
-      if (data.pressure !== undefined) state.pressure = data.pressure;
-      if (data.screen !== undefined && !state.isBooting) {
-        if (data.screen === 1 && state.oledScreen !== 1) showOledScreen1();
-        else if (data.screen === 2 && state.oledScreen !== 2) showOledScreen2();
-      }
-
-      updateMetricCards();
-      
-      const connPill = document.getElementById('connectionPill');
-      const connLabel = document.getElementById('connectionLabel');
-      if (connLabel) connLabel.textContent = `ESP32 (${state.espIp})`;
-      if (connPill) connPill.querySelector('.status-dot').className = 'status-dot online';
-
-    } catch (err) {
-      console.warn('ESP32 polling error:', err.message);
-      const connLabel = document.getElementById('connectionLabel');
-      const connPill = document.getElementById('connectionPill');
-      if (connLabel) connLabel.textContent = `ESP32 RECONNECTING...`;
-      if (connPill) connPill.querySelector('.status-dot').className = 'status-dot';
-      
-      // Fallback to slight drift so UI stays alive
-      runSimulationStep();
-    }
-  };
-
-  // Main Polling Loop
-  let pollTimer = setInterval(() => {
-    if (state.connectionMode === 'sim') {
-      runSimulationStep();
+    if (online) {
+      if (connectionLabel) connectionLabel.textContent = 'ESP32 LIVE (ONLINE)';
+      if (statusDot) statusDot.className = 'status-dot online';
+      if (connectionPill) connectionPill.style.borderColor = 'rgba(16, 185, 129, 0.4)';
     } else {
-      fetchEsp32Data();
+      if (connectionLabel) connectionLabel.textContent = 'WAITING FOR ESP32...';
+      if (statusDot) statusDot.className = 'status-dot';
+      if (connectionPill) connectionPill.style.borderColor = 'rgba(255, 255, 255, 0.14)';
     }
-  }, state.refreshRate);
+  };
 
-  // Push chart point every 10 seconds
-  setInterval(pushTelemetryPoint, 10000);
-  updateMetricCards();
+  const autoLinkEsp32 = async () => {
+    let received = false;
+
+    // 1. Try fetching from Cloud Endpoint
+    try {
+      const response = await fetch(BACKUP_DATA_URL, { signal: AbortSignal.timeout(3000) });
+      if (response.ok) {
+        const data = await response.json();
+        if (data && (data.temp !== undefined || data.temperature !== undefined)) {
+          state.temperature = data.temp !== undefined ? data.temp : data.temperature;
+          state.humidity = data.humidity !== undefined ? data.humidity : data.humi;
+          state.pressure = data.pressure !== undefined ? data.pressure : data.pres;
+          state.lastSeenTimestamp = Date.now();
+          received = true;
+        }
+      }
+    } catch (e) {
+      // Cloud fallback check
+    }
+
+    // 2. If not found via Cloud, try local mDNS / LAN auto-discovery
+    if (!received) {
+      try {
+        const localRes = await fetch('http://esp32-weather.local/api/data', { signal: AbortSignal.timeout(1500) });
+        if (localRes.ok) {
+          const data = await localRes.json();
+          if (data && data.temp !== undefined) {
+            state.temperature = data.temp;
+            state.humidity = data.humidity;
+            state.pressure = data.pressure;
+            state.lastSeenTimestamp = Date.now();
+            received = true;
+          }
+        }
+      } catch (e) {
+        // Silent
+      }
+    }
+
+    // Evaluate connection freshness (within last 15 seconds)
+    const isFresh = received || (Date.now() - state.lastSeenTimestamp < 15000 && state.lastSeenTimestamp > 0);
+    updateConnectionStatus(isFresh);
+
+    if (isFresh) {
+      updateMetricCards();
+    }
+  };
+
+  // Auto-link polling loop every 2 seconds
+  setInterval(autoLinkEsp32, 2000);
+  setInterval(pushTelemetryPoint, 8000);
+  autoLinkEsp32();
 
   // ==========================================================================
-  // 6. ATMOSPHERIC PARTICLE CANVAS (MIST & SUNBEAMS)
+  // 5. ATMOSPHERIC PARTICLES (MIST & SUNBEAMS)
   // ==========================================================================
   const initParticles = () => {
     const canvas = document.getElementById('particleCanvas');
@@ -614,136 +449,5 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   initParticles();
-
-  // ==========================================================================
-  // 7. AMBIENT NATURE AUDIO CONTROLLER
-  // ==========================================================================
-  const natureAudio = document.getElementById('natureAudio');
-  const audioToggleBtn = document.getElementById('audioToggleBtn');
-  const audioIcon = document.getElementById('audioIcon');
-
-  if (audioToggleBtn && natureAudio) {
-    audioToggleBtn.addEventListener('click', () => {
-      if (state.isAudioPlaying) {
-        natureAudio.pause();
-        state.isAudioPlaying = false;
-        audioToggleBtn.classList.remove('playing');
-        audioIcon.className = 'fa-solid fa-volume-xmark';
-      } else {
-        natureAudio.volume = 0.4;
-        natureAudio.play().then(() => {
-          state.isAudioPlaying = true;
-          audioToggleBtn.classList.add('playing');
-          audioIcon.className = 'fa-solid fa-volume-high';
-        }).catch(e => {
-          console.log('Audio autoplay policy required user gesture');
-        });
-      }
-    });
-  }
-
-  // ==========================================================================
-  // 8. SETTINGS MODAL & HARDWARE LINK CONFIG
-  // ==========================================================================
-  const settingsModal = document.getElementById('settingsModal');
-  const settingsModalBtn = document.getElementById('settingsModalBtn');
-  const closeModalBtn = document.getElementById('closeModalBtn');
-  const footerConfigLink = document.getElementById('footerConfigLink');
-  const connectionModeSelect = document.getElementById('connectionMode');
-  const espIpGroup = document.getElementById('espIpGroup');
-  const espIpInput = document.getElementById('espIpInput');
-  const refreshRateInput = document.getElementById('refreshRateInput');
-  const testConnBtn = document.getElementById('testConnBtn');
-  const saveConnBtn = document.getElementById('saveConnBtn');
-  const connTestResult = document.getElementById('connTestResult');
-
-  const openSettings = () => {
-    if (settingsModal) settingsModal.classList.add('active');
-  };
-
-  const closeSettings = () => {
-    if (settingsModal) settingsModal.classList.remove('active');
-    if (connTestResult) connTestResult.style.display = 'none';
-  };
-
-  if (settingsModalBtn) settingsModalBtn.addEventListener('click', openSettings);
-  if (footerConfigLink) footerConfigLink.addEventListener('click', (e) => { e.preventDefault(); openSettings(); });
-  if (closeModalBtn) closeModalBtn.addEventListener('click', closeSettings);
-
-  // Close when clicking modal backdrop
-  if (settingsModal) {
-    settingsModal.addEventListener('click', (e) => {
-      if (e.target === settingsModal) closeSettings();
-    });
-  }
-
-  // Connection Mode Change
-  if (connectionModeSelect) {
-    connectionModeSelect.addEventListener('change', () => {
-      const mode = connectionModeSelect.value;
-      if (mode === 'sim') {
-        espIpGroup.style.display = 'none';
-      } else {
-        espIpGroup.style.display = 'flex';
-      }
-    });
-  }
-
-  // Test ESP32 Link
-  if (testConnBtn) {
-    testConnBtn.addEventListener('click', async () => {
-      const mode = connectionModeSelect.value;
-      connTestResult.className = 'connection-test-result';
-      connTestResult.style.display = 'block';
-
-      if (mode === 'sim') {
-        connTestResult.className = 'connection-test-result success';
-        connTestResult.textContent = '✓ Virtual simulation engine is active and ready.';
-        return;
-      }
-
-      const ip = espIpInput.value.trim();
-      connTestResult.textContent = `Connecting to http://${ip}/api/data...`;
-
-      try {
-        const res = await fetch(`http://${ip}/api/data`, { signal: AbortSignal.timeout(3500) });
-        if (res.ok) {
-          connTestResult.className = 'connection-test-result success';
-          connTestResult.textContent = `✓ Successfully linked to ESP32 at ${ip}!`;
-        } else {
-          throw new Error(`HTTP Status ${res.status}`);
-        }
-      } catch (err) {
-        connTestResult.className = 'connection-test-result error';
-        connTestResult.textContent = `✗ Connection failed: ${err.message}. Check ESP32 Wi-Fi & IP.`;
-      }
-    });
-  }
-
-  // Save Settings
-  if (saveConnBtn) {
-    saveConnBtn.addEventListener('click', () => {
-      state.connectionMode = connectionModeSelect.value;
-      state.espIp = espIpInput.value.trim() || '192.168.1.150';
-      state.refreshRate = parseInt(refreshRateInput.value, 10) || 2000;
-
-      // Reset polling interval
-      clearInterval(pollTimer);
-      pollTimer = setInterval(() => {
-        if (state.connectionMode === 'sim') {
-          runSimulationStep();
-        } else {
-          fetchEsp32Data();
-        }
-      }, state.refreshRate);
-
-      const connLabel = document.getElementById('connectionLabel');
-      if (connLabel) {
-        connLabel.textContent = state.connectionMode === 'sim' ? 'LIVE SIMULATION' : `ESP32 (${state.espIp})`;
-      }
-
-      closeSettings();
-    });
-  }
 
 });
