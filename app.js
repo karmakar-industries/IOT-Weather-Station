@@ -1,28 +1,27 @@
 /**
  * ==========================================================================
  * AEROMETRICS PRO - IoT Weather Station Dashboard
- * Automated Cloud Link: ESP32 -> Cloud Endpoint -> Live Web Dashboard
+ * Architecture: ESP32 ---> GitHub (data.json) ---> Phone / Browser
  * ==========================================================================
  */
 
 document.addEventListener('DOMContentLoaded', () => {
 
-  // --- APPLICATION STATE ---
   const state = {
-    // Current Sensor Data (Initialized to null/waiting)
     temperature: null,
     humidity: null,
     pressure: null,
     altitude: null,
     lastSeenTimestamp: 0,
-    
-    // Status
     isOnline: false,
-
-    // Active Chart Tab
     activeChartMetric: 'temperature',
     
-    // Telemetry History for Charts (Max 15 points)
+    // Direct GitHub Data Endpoints (Same-Origin & Raw Fallback)
+    dataEndpoints: [
+      `./data.json?t=${Date.now()}`,
+      `https://raw.githubusercontent.com/karmakar-industries/IOT-Weather-Station/main/data.json?t=${Date.now()}`
+    ],
+    
     history: {
       timestamps: [],
       temperature: [],
@@ -31,14 +30,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   };
 
-  // Cloud API Endpoint where ESP32 auto-posts sensor JSON
-  // Free public JSON cloud bin / Firebase endpoint for instant zero-config sync
-  const CLOUD_DATA_URL = 'https://api.jsonbin.io/v3/b/66c4a8a0e41b4d34e424bb92/latest'; 
-  // Fallback endpoint for direct/mock sync if cloud is establishing
-  const BACKUP_DATA_URL = 'https://iot-weather-station-karmakar-default-rtdb.firebaseio.com/weather.json';
-
   // ==========================================================================
-  // 1. CLOCK & DATE FORMATTER
+  // 1. SYSTEM CLOCK & CALENDAR
   // ==========================================================================
   const updateSystemClock = () => {
     const now = new Date();
@@ -60,7 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateSystemClock();
 
   // ==========================================================================
-  // 2. TELEMETRY & SENSOR CALCULATIONS ENGINE
+  // 2. SENSOR METRICS & GAUGES
   // ==========================================================================
   const updateMetricCards = () => {
     const tempValue = document.getElementById('tempValue');
@@ -84,7 +77,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const airDensityVal = document.getElementById('airDensityVal');
 
     if (state.temperature === null) {
-      // Waiting / Offline state
       if (tempValue) tempValue.textContent = '--.-';
       if (tempFahrenheit) tempFahrenheit.textContent = '--.-°F';
       if (humidityValue) humidityValue.textContent = '--';
@@ -94,16 +86,16 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Temperature Display
+    // Temperature
     if (tempValue) tempValue.textContent = state.temperature.toFixed(1);
     const fahrenheit = (state.temperature * 9 / 5) + 32;
     if (tempFahrenheit) tempFahrenheit.textContent = `${fahrenheit.toFixed(1)}°F`;
 
-    // Heat Index (Feels like)
+    // Feels like
     const feelsLike = state.temperature + 0.33 * (state.humidity / 100 * 6.105 * Math.exp(17.27 * state.temperature / (237.7 + state.temperature))) - 4.0;
     if (tempFeels) tempFeels.textContent = `${feelsLike.toFixed(1)}°C`;
 
-    // Min & Max
+    // Min/Max
     if (state.history.temperature.length > 0) {
       const min = Math.min(...state.history.temperature);
       const max = Math.max(...state.history.temperature);
@@ -111,50 +103,42 @@ document.addEventListener('DOMContentLoaded', () => {
       if (tempMax) tempMax.textContent = `${max.toFixed(1)}°C`;
     }
 
-    // Temp Gauge (Range: 0°C to 50°C)
     if (tempGauge) {
       const tempPercent = Math.min(Math.max((state.temperature / 50), 0), 1);
-      const circumference = 264;
-      const offset = circumference - (tempPercent * circumference);
-      tempGauge.style.strokeDashoffset = offset;
+      tempGauge.style.strokeDashoffset = 264 - (tempPercent * 264);
     }
 
-    // Humidity Display
+    // Humidity
     if (humidityValue) humidityValue.textContent = Math.round(state.humidity);
 
-    // Humidity Gauge (0% to 100%)
     if (humidityGauge) {
       const humPercent = state.humidity / 100;
-      const circumference = 264;
-      const offset = circumference - (humPercent * circumference);
-      humidityGauge.style.strokeDashoffset = offset;
+      humidityGauge.style.strokeDashoffset = 264 - (humPercent * 264);
     }
 
-    // Dew Point Calculation
+    // Dew point
     const a = 17.27;
     const b = 237.7;
     const alpha = ((a * state.temperature) / (b + state.temperature)) + Math.log(state.humidity / 100.0);
     const dp = (b * alpha) / (a - alpha);
     if (dewPoint) dewPoint.textContent = `${dp.toFixed(1)}°C`;
 
-    // Absolute Humidity (g/m3)
+    // Absolute humidity
     const absHum = (6.112 * Math.exp((17.67 * state.temperature) / (state.temperature + 243.5)) * state.humidity * 2.1674) / (273.15 + state.temperature);
     if (absHumidity) absHumidity.textContent = `${absHum.toFixed(1)} g/m³`;
 
-    // Comfort Level Text
     if (comfortLevel) {
       if (state.humidity < 35) comfortLevel.textContent = 'Dry';
       else if (state.humidity <= 65) comfortLevel.textContent = 'Comfortable';
       else comfortLevel.textContent = 'Humid';
     }
 
-    // Pressure Display (BMP280)
+    // Pressure & Altitude
     if (pressureValue) pressureValue.textContent = state.pressure.toFixed(1);
 
     const mmHg = state.pressure * 0.750062;
     if (pressureMmHg) pressureMmHg.textContent = `${mmHg.toFixed(1)} mmHg`;
 
-    // Hypsometric altitude estimation
     const p0 = 1013.25;
     const alt = 44330.0 * (1.0 - Math.pow(state.pressure / p0, 0.1903));
     state.altitude = Math.round(alt);
@@ -165,15 +149,11 @@ document.addEventListener('DOMContentLoaded', () => {
       seaLevelPres.textContent = `${pSea.toFixed(1)} hPa`;
     }
 
-    // Pressure Gauge (950 to 1050 hPa)
     if (pressureGauge) {
       const presPercent = Math.min(Math.max((state.pressure - 950) / 100, 0), 1);
-      const circumference = 264;
-      const offset = circumference - (presPercent * circumference);
-      pressureGauge.style.strokeDashoffset = offset;
+      pressureGauge.style.strokeDashoffset = 264 - (presPercent * 264);
     }
 
-    // Air density
     if (airDensityVal) {
       const rho = (state.pressure * 100) / (287.058 * (state.temperature + 273.15));
       airDensityVal.textContent = `${rho.toFixed(3)} kg/m³`;
@@ -314,7 +294,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   // ==========================================================================
-  // 4. AUTOMATIC CLOUD & ESP32 AUTO-LINK ENGINE
+  // 4. DIRECT GITHUB DATA SYNC ENGINE (data.json)
   // ==========================================================================
   const updateConnectionStatus = (online) => {
     state.isOnline = online;
@@ -323,71 +303,61 @@ document.addEventListener('DOMContentLoaded', () => {
     const connectionLabel = document.getElementById('connectionLabel');
 
     if (online) {
-      if (connectionLabel) connectionLabel.textContent = 'ESP32 LIVE (ONLINE)';
+      if (connectionLabel) connectionLabel.textContent = 'ESP32 LIVE (GITHUB SYNC)';
       if (statusDot) statusDot.className = 'status-dot online';
       if (connectionPill) connectionPill.style.borderColor = 'rgba(16, 185, 129, 0.4)';
     } else {
-      if (connectionLabel) connectionLabel.textContent = 'WAITING FOR ESP32...';
+      if (connectionLabel) connectionLabel.textContent = 'CONNECTING TO GITHUB...';
       if (statusDot) statusDot.className = 'status-dot';
       if (connectionPill) connectionPill.style.borderColor = 'rgba(255, 255, 255, 0.14)';
     }
   };
 
-  const autoLinkEsp32 = async () => {
-    let received = false;
+  const fetchGithubData = async () => {
+    let payload = null;
 
-    // 1. Try fetching from Cloud Endpoint
+    // Try same-origin ./data.json first
     try {
-      const response = await fetch(BACKUP_DATA_URL, { signal: AbortSignal.timeout(3000) });
-      if (response.ok) {
-        const data = await response.json();
-        if (data && (data.temp !== undefined || data.temperature !== undefined)) {
-          state.temperature = data.temp !== undefined ? data.temp : data.temperature;
-          state.humidity = data.humidity !== undefined ? data.humidity : data.humi;
-          state.pressure = data.pressure !== undefined ? data.pressure : data.pres;
-          state.lastSeenTimestamp = Date.now();
-          received = true;
-        }
+      const res = await fetch(`./data.json?cache_bust=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+      if (res.ok) {
+        payload = await res.json();
       }
     } catch (e) {
-      // Cloud fallback check
+      // Fallback to raw github
     }
 
-    // 2. If not found via Cloud, try local mDNS / LAN auto-discovery
-    if (!received) {
+    if (!payload) {
       try {
-        const localRes = await fetch('http://esp32-weather.local/api/data', { signal: AbortSignal.timeout(1500) });
-        if (localRes.ok) {
-          const data = await localRes.json();
-          if (data && data.temp !== undefined) {
-            state.temperature = data.temp;
-            state.humidity = data.humidity;
-            state.pressure = data.pressure;
-            state.lastSeenTimestamp = Date.now();
-            received = true;
-          }
+        const rawRes = await fetch(`https://raw.githubusercontent.com/karmakar-industries/IOT-Weather-Station/main/data.json?cache_bust=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+        if (rawRes.ok) {
+          payload = await rawRes.json();
         }
       } catch (e) {
-        // Silent
+        // Offline
       }
     }
 
-    // Evaluate connection freshness (within last 15 seconds)
-    const isFresh = received || (Date.now() - state.lastSeenTimestamp < 15000 && state.lastSeenTimestamp > 0);
-    updateConnectionStatus(isFresh);
+    if (payload && (payload.temp !== undefined || payload.temperature !== undefined)) {
+      state.temperature = payload.temp !== undefined ? payload.temp : payload.temperature;
+      state.humidity = payload.humidity !== undefined ? payload.humidity : payload.humi;
+      state.pressure = payload.pressure !== undefined ? payload.pressure : payload.pres;
+      state.lastSeenTimestamp = Date.now();
 
-    if (isFresh) {
+      updateConnectionStatus(true);
       updateMetricCards();
+    } else {
+      const isFresh = (Date.now() - state.lastSeenTimestamp < 15000 && state.lastSeenTimestamp > 0);
+      updateConnectionStatus(isFresh);
     }
   };
 
-  // Auto-link polling loop every 2 seconds
-  setInterval(autoLinkEsp32, 2000);
+  // Poll data.json every 2.5 seconds
+  setInterval(fetchGithubData, 2500);
   setInterval(pushTelemetryPoint, 8000);
-  autoLinkEsp32();
+  fetchGithubData();
 
   // ==========================================================================
-  // 5. ATMOSPHERIC PARTICLES (MIST & SUNBEAMS)
+  // 5. ATMOSPHERIC PARTICLES
   // ==========================================================================
   const initParticles = () => {
     const canvas = document.getElementById('particleCanvas');
@@ -403,9 +373,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     const particles = [];
-    const particleCount = 45;
-
-    for (let i = 0; i < particleCount; i++) {
+    for (let i = 0; i < 45; i++) {
       particles.push({
         x: Math.random() * width,
         y: Math.random() * height,

@@ -2,16 +2,18 @@
  * ==========================================================================
  * AEROMETRICS PRO - IoT Weather Station & OLED HUD Firmware
  * Platform: ESP32 (Arduino Framework)
+ * Direct Pipeline: ESP32 ---> GitHub (data.json) ---> Phone / Webpage
+ *
  * Features:
+ *   - Direct GitHub Contents API Push (Updates data.json on GitHub repository)
+ *   - Auto-Detecting I2C Scanner for 0.96" SSD1306 OLED (0x3C / 0x3D)
+ *   - Auto-Detecting BMP280 Sensor (0x76 / 0x77)
  *   - DHT11 (Temperature & Humidity)
- *   - BMP280 (Barometric Pressure & Precision Temperature / Altitude)
- *   - SSD1306 OLED (128x64 I2C HUD)
  *   - Boot Animation ("KARMAKAR INDUSTRY" & Progress Bar)
- *   - Touch Sensor Switching (Screen 1: Time/Date <-> Screen 2: Weather HUD)
+ *   - Touch Sensor Switching (Screen 1 Time/Date <-> Screen 2 Weather HUD)
  *   - 10-Second Inactivity Auto-revert to Time Screen
- *   - Automated Cloud Push (Syncs to GitHub domain as soon as Wi-Fi connects!)
+ *   - Local REST API on Port 80 (/api/data) & mDNS (esp32-weather.local)
  *   - NTP Time Synchronization over Wi-Fi
- *   - Local REST API & mDNS (esp32-weather.local)
  *
  * Developed for: Rudra Workshop / Karmakar Industry
  * ==========================================================================
@@ -36,7 +38,7 @@
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET_PIN);
 DHT dht(DHT_PIN, DHT_TYPE);
-Adafruit_BMP280 bmp; // I2C BMP280
+Adafruit_BMP280 bmp;
 WebServer server(80);
 
 // --- State Machine Enumeration ---
@@ -55,66 +57,138 @@ float currentPressure = 0.0;
 float currentAltitude = 0.0;
 
 unsigned long lastSensorReadTime = 0;
-unsigned long lastCloudSyncTime = 0;
+unsigned long lastGithubSyncTime = 0;
 unsigned long lastScreenTouchTime = 0;
 bool lastTouchState = false;
 bool bmpAvailable = false;
+bool oledAvailable = false;
 bool wifiConnected = false;
+uint8_t oledAddress = 0x3C;
+String currentFileSha = "";
 
-// Time tracking
 struct tm timeinfo;
 
-// ==========================================================================
-// BITMAPS & GLYPHS FOR OLED HUD
-// ==========================================================================
 // 8x8 WiFi Connected Icon
 const unsigned char epd_bitmap_wifi[] PROGMEM = {
-  0b00111100,
-  0b01000010,
-  0b10011001,
-  0b00100100,
-  0b01000010,
-  0b00011000,
-  0b00011000,
-  0b00000000
+  0b00111100, 0b01000010, 0b10011001, 0b00100100,
+  0b01000010, 0b00011000, 0b00011000, 0b00000000
 };
+
+// ==========================================================================
+// BASE64 ENCODER HELPER (Standard Base64)
+// ==========================================================================
+const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+String base64Encode(const String &input) {
+  String output = "";
+  int i = 0;
+  int j = 0;
+  unsigned char char_array_3[3];
+  unsigned char char_array_4[4];
+  int in_len = input.length();
+  int pos = 0;
+
+  while (in_len--) {
+    char_array_3[i++] = input[pos++];
+    if (i == 3) {
+      char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+      char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+      char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+      char_array_4[3] = char_array_3[2] & 0x3f;
+
+      for (i = 0; i < 4; i++) output += base64_chars[char_array_4[i]];
+      i = 0;
+    }
+  }
+
+  if (i) {
+    for (j = i; j < 3; j++) char_array_3[j] = '\0';
+    char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+    char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+    char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+    char_array_4[3] = char_array_3[2] & 0x3f;
+
+    for (j = 0; (j < i + 1); j++) output += base64_chars[char_array_4[j]];
+    while ((i++ < 3)) output += '=';
+  }
+
+  return output;
+}
+
+// ==========================================================================
+// AUTOMATIC I2C SCANNER & INITIALIZER
+// ==========================================================================
+void scanAndInitI2C() {
+  Serial.println(F("\n[I2C] Scanning I2C Bus on SDA(21), SCL(22)..."));
+  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
+  Wire.setClock(100000);
+
+  byte count = 0;
+  for (byte addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    byte error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.printf("[I2C] Device found at address 0x%02X\n", addr);
+      count++;
+
+      if (addr == 0x3C || addr == 0x3D) {
+        oledAddress = addr;
+      }
+      if (addr == 0x76 || addr == 0x77) {
+        if (bmp.begin(addr)) {
+          bmpAvailable = true;
+          Serial.printf("[BMP280] Sensor initialized successfully at 0x%02X\n", addr);
+        }
+      }
+    }
+  }
+
+  if (count == 0) {
+    Serial.println(F("[ERROR] No I2C devices found! Check wiring."));
+  }
+
+  Serial.printf("[OLED] Initializing SSD1306 0.96\" OLED at 0x%02X...\n", oledAddress);
+  if (display.begin(SSD1306_SWITCHCAPVCC, oledAddress)) {
+    oledAvailable = true;
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.dim(false);
+    Serial.println(F("[OLED] Display initialized successfully!"));
+  } else {
+    uint8_t altAddr = (oledAddress == 0x3C) ? 0x3D : 0x3C;
+    if (display.begin(SSD1306_SWITCHCAPVCC, altAddr)) {
+      oledAvailable = true;
+      display.clearDisplay();
+      display.setTextColor(SSD1306_WHITE);
+      Serial.println(F("[OLED] Display initialized at alternate address!"));
+    }
+  }
+}
 
 // ==========================================================================
 // OLED DISPLAY RENDERING FUNCTIONS
 // ==========================================================================
-
-/**
- * Renders the Bootloader Screen with animated Progress Bar
- * "KARMAKAR INDUSTRY" & Progress percentage
- */
 void drawBootScreen(int progressPercent) {
+  if (!oledAvailable) return;
+
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // Top Header: Branding
   display.setTextSize(1);
   display.setCursor(12, 4);
   display.print(F("KARMAKAR INDUSTRY"));
   display.drawFastHLine(0, 15, SCREEN_WIDTH, SSD1306_WHITE);
 
-  // Center: Loading title
   display.setCursor(34, 23);
   display.print(F("LOADING..."));
 
-  // Progress Bar Box (Outer Frame)
-  int barX = 14;
-  int barY = 36;
-  int barW = 100;
-  int barH = 12;
-  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
-
-  // Progress Bar Fill
-  int fillW = (barW - 4) * progressPercent / 100;
-  if (fillW > 0) {
-    display.fillRect(barX + 2, barY + 2, fillW, barH - 4, SSD1306_WHITE);
+  display.drawRect(14, 36, 100, 12, SSD1306_WHITE);
+  int fillWReal = 96 * progressPercent / 100;
+  if (fillWReal > 0) {
+    display.fillRect(16, 38, fillWReal, 8, SSD1306_WHITE);
   }
 
-  // Bottom percentage
   display.setCursor(52, 52);
   display.print(progressPercent);
   display.print(F("%"));
@@ -122,14 +196,12 @@ void drawBootScreen(int progressPercent) {
   display.display();
 }
 
-/**
- * Screen 1 (Default HUD): NTP Time & Date
- */
 void drawScreen1_TimeDate() {
+  if (!oledAvailable) return;
+
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // Top Status Bar: WiFi Icon + Station Badge
   if (wifiConnected) {
     display.drawBitmap(2, 2, epd_bitmap_wifi, 8, 8, SSD1306_WHITE);
   }
@@ -138,7 +210,6 @@ void drawScreen1_TimeDate() {
   display.print(F("AERO-HUD"));
   display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
 
-  // Format Time (HH:MM:SS)
   char timeString[10];
   if (getLocalTime(&timeinfo)) {
     strftime(timeString, sizeof(timeString), "%H:%M:%S", &timeinfo);
@@ -146,12 +217,10 @@ void drawScreen1_TimeDate() {
     snprintf(timeString, sizeof(timeString), "12:00:00");
   }
 
-  // Large Centered Clock Display
   display.setTextSize(2);
   display.setCursor(16, 20);
   display.print(timeString);
 
-  // Format Date (e.g., WED, 19 AUG)
   char dateString[20];
   if (getLocalTime(&timeinfo)) {
     strftime(dateString, sizeof(dateString), "%a, %d %b %Y", &timeinfo);
@@ -163,22 +232,18 @@ void drawScreen1_TimeDate() {
   display.setCursor(18, 42);
   display.print(dateString);
 
-  // Bottom Footer Hint
   display.setCursor(14, 55);
   display.print(F("[ TOUCH SENSOR ]"));
 
   display.display();
 }
 
-/**
- * Screen 2: Weather Sensor Metrics (Temp, Humidity, Pressure)
- * Shows 10-second auto-return countdown timer in top right
- */
 void drawScreen2_Weather() {
+  if (!oledAvailable) return;
+
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // Top Status Bar
   if (wifiConnected) {
     display.drawBitmap(2, 2, epd_bitmap_wifi, 8, 8, SSD1306_WHITE);
   }
@@ -186,7 +251,6 @@ void drawScreen2_Weather() {
   display.setCursor(28, 2);
   display.print(F("WEATHER HUD"));
 
-  // Inactivity countdown remaining
   unsigned long elapsed = millis() - lastScreenTouchTime;
   int remainingSec = (SCREEN_TIMEOUT_MS - elapsed) / 1000;
   if (remainingSec < 0) remainingSec = 0;
@@ -196,27 +260,22 @@ void drawScreen2_Weather() {
   display.print(F("s"));
   display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
 
-  // 1. Temperature Row
   display.setCursor(4, 18);
   display.print(F("TEMP: "));
   display.print(currentTemperature, 1);
   display.print(F(" C"));
 
-  // 2. Humidity Row
   display.setCursor(4, 32);
   display.print(F("HUMI: "));
   display.print((int)currentHumidity);
   display.print(F(" %"));
 
-  // 3. Pressure Row (BMP280)
   display.setCursor(4, 46);
   display.print(F("PRES: "));
   display.print(currentPressure, 1);
   display.print(F(" hPa"));
 
-  // Subtle bottom border
   display.drawFastHLine(0, 60, SCREEN_WIDTH, SSD1306_WHITE);
-
   display.display();
 }
 
@@ -224,7 +283,6 @@ void drawScreen2_Weather() {
 // SENSOR ACQUISITION & TELEMETRY
 // ==========================================================================
 void readSensors() {
-  // Read DHT11
   float h = dht.readHumidity();
   float t = dht.readTemperature();
 
@@ -233,9 +291,8 @@ void readSensors() {
     currentTemperature = t;
   }
 
-  // Read BMP280 if initialized
   if (bmpAvailable) {
-    float p = bmp.readPressure() / 100.0F; // Convert Pa to hPa
+    float p = bmp.readPressure() / 100.0F;
     float bmpTemp = bmp.readTemperature();
     
     if (p > 300.0 && p < 1200.0) {
@@ -252,35 +309,92 @@ void readSensors() {
 }
 
 // ==========================================================================
-// AUTOMATED CLOUD SYNC (AUTOLINK WITH GITHUB DOMAIN)
+// DIRECT GITHUB REPOSITORY SYNC (ESP32 ---> GitHub ---> Phone)
 // ==========================================================================
-void pushDataToCloud() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
+void fetchGithubFileSha() {
   WiFiClientSecure client;
-  client.setInsecure(); // Allow secure HTTPS without certificate pinning
+  client.setInsecure();
 
   HTTPClient https;
-  if (https.begin(client, CLOUD_POST_URL)) {
+  String apiUrl = "https://api.github.com/repos/" + String(GITHUB_OWNER) + "/" + String(GITHUB_REPO) + "/contents/" + String(GITHUB_FILE_PATH);
+
+  if (https.begin(client, apiUrl)) {
+    https.addHeader("User-Agent", "ESP32-Weather-Station");
+    https.addHeader("Accept", "application/vnd.github.v3+json");
+    if (String(GITHUB_PAT_TOKEN) != "YOUR_GITHUB_TOKEN") {
+      https.addHeader("Authorization", "token " + String(GITHUB_PAT_TOKEN));
+    }
+
+    int code = https.GET();
+    if (code == 200) {
+      String response = https.getString();
+      int shaIndex = response.indexOf("\"sha\":\"");
+      if (shaIndex != -1) {
+        currentFileSha = response.substring(shaIndex + 7, shaIndex + 47);
+        Serial.printf("[GITHUB] Found data.json SHA: %s\n", currentFileSha.c_str());
+      }
+    }
+    https.end();
+  }
+}
+
+void pushDataToGithub() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  if (String(GITHUB_PAT_TOKEN) == "YOUR_GITHUB_TOKEN") {
+    Serial.println(F("[GITHUB] Note: Please add your GITHUB_PAT_TOKEN in config.h to push to GitHub!"));
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  String apiUrl = "https://api.github.com/repos/" + String(GITHUB_OWNER) + "/" + String(GITHUB_REPO) + "/contents/" + String(GITHUB_FILE_PATH);
+
+  if (currentFileSha == "") {
+    fetchGithubFileSha();
+  }
+
+  if (https.begin(client, apiUrl)) {
+    https.addHeader("User-Agent", "ESP32-Weather-Station");
+    https.addHeader("Accept", "application/vnd.github.v3+json");
+    https.addHeader("Authorization", "token " + String(GITHUB_PAT_TOKEN));
     https.addHeader("Content-Type", "application/json");
 
-    // Build JSON Payload
-    String jsonPayload = "{";
-    jsonPayload += "\"temp\":" + String(currentTemperature, 1) + ",";
-    jsonPayload += "\"humidity\":" + String(currentHumidity, 0) + ",";
-    jsonPayload += "\"pressure\":" + String(currentPressure, 1) + ",";
-    jsonPayload += "\"altitude\":" + String(currentAltitude, 0) + ",";
-    jsonPayload += "\"screen\":" + String((int)currentScreen) + ",";
-    jsonPayload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-    jsonPayload += "\"timestamp\":" + String(millis() / 1000);
-    jsonPayload += "}";
+    String rawJson = "{\n";
+    rawJson += "  \"temp\": " + String(currentTemperature, 1) + ",\n";
+    rawJson += "  \"humidity\": " + String(currentHumidity, 0) + ",\n";
+    rawJson += "  \"pressure\": " + String(currentPressure, 1) + ",\n";
+    rawJson += "  \"altitude\": " + String(currentAltitude, 0) + ",\n";
+    rawJson += "  \"timestamp\": " + String(millis() / 1000) + "\n";
+    rawJson += "}";
 
-    // Use HTTP PUT to update root object
-    int httpCode = https.PUT(jsonPayload);
-    if (httpCode > 0) {
-      Serial.printf("[CLOUD SYNC] Auto-linked to domain! (HTTP %d)\n", httpCode);
+    String base64Content = base64Encode(rawJson);
+
+    String requestBody = "{\n";
+    requestBody += "  \"message\": \"ESP32 Live Telemetry Update\",\n";
+    requestBody += "  \"content\": \"" + base64Content + "\"";
+    if (currentFileSha.length() == 40) {
+      requestBody += ",\n  \"sha\": \"" + currentFileSha + "\"\n";
     } else {
-      Serial.printf("[CLOUD SYNC] Sync error: %s\n", https.errorToString(httpCode).c_str());
+      requestBody += "\n";
+    }
+    requestBody += "}";
+
+    int httpCode = https.PUT(requestBody);
+    if (httpCode == 200 || httpCode == 201) {
+      String res = https.getString();
+      int newShaIndex = res.indexOf("\"sha\":\"");
+      if (newShaIndex != -1) {
+        currentFileSha = res.substring(newShaIndex + 7, newShaIndex + 47);
+      }
+      Serial.println(F("[GITHUB] Pushed live weather data directly to GitHub repo!"));
+    } else {
+      Serial.printf("[GITHUB] Push status: HTTP %d\n", httpCode);
+      if (httpCode == 409) {
+        currentFileSha = "";
+      }
     }
     https.end();
   }
@@ -291,8 +405,7 @@ void pushDataToCloud() {
 // ==========================================================================
 bool readTouchInput() {
 #if USE_CAPACITIVE_TOUCH
-  int val = touchRead(TOUCH_SENSOR_PIN);
-  return (val < TOUCH_THRESHOLD);
+  return (touchRead(TOUCH_SENSOR_PIN) < TOUCH_THRESHOLD);
 #else
   return (digitalRead(TOUCH_SENSOR_PIN) == HIGH);
 #endif
@@ -316,11 +429,9 @@ void handleTouchSensor() {
 
   lastTouchState = currentTouch;
 
-  // Inactivity Auto-revert Check (10s)
   if (currentScreen == SCREEN_WEATHER) {
     if (millis() - lastScreenTouchTime >= SCREEN_TIMEOUT_MS) {
       currentScreen = SCREEN_TIME;
-      Serial.println(F("[TIMEOUT] 10s elapsed with no touch. Auto-reverted to Screen 1"));
     }
   }
 }
@@ -350,32 +461,27 @@ void handleApiData() {
 // ==========================================================================
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(300);
   Serial.println(F("\n=========================================="));
   Serial.println(F("  AEROMETRICS PRO - IoT Weather Station  "));
   Serial.println(F("  Karmakar Industry & Rudra Workshop     "));
   Serial.println(F("=========================================="));
 
-  // 1. Initialize I2C Bus & OLED Display
-  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
-    Serial.println(F("[ERROR] SSD1306 OLED init failed at 0x3C!"));
-    display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
-  }
+  // 1. Scan and Initialize I2C Bus & OLED Display
+  scanAndInitI2C();
 
   // 2. Play Boot Animation & Progress Bar
-  for (int p = 10; p <= 100; p += 15) {
-    drawBootScreen(p);
-    delay(150);
+  if (oledAvailable) {
+    for (int p = 10; p <= 100; p += 15) {
+      drawBootScreen(p);
+      delay(100);
+    }
+    delay(200);
   }
-  delay(300);
 
-  // 3. Initialize DHT11 & BMP280 Sensors
+  // 3. Initialize DHT11
   dht.begin();
-  if (bmp.begin(BMP280_I2C_ADDR)) {
-    Serial.println(F("[OK] BMP280 Sensor initialized."));
-    bmpAvailable = true;
-  }
+  Serial.println(F("[DHT11] Sensor initialized."));
 
   // 4. Configure Touch Sensor Input
 #if !USE_CAPACITIVE_TOUCH
@@ -385,8 +491,7 @@ void setup() {
   // 5. Connect to Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print(F("[WIFI] Connecting to "));
-  Serial.print(WIFI_SSID);
+  Serial.print(F("[WIFI] Connecting to Wi-Fi"));
 
   int wifiAttempts = 0;
   while (WiFi.status() != WL_CONNECTED && wifiAttempts < 20) {
@@ -413,10 +518,11 @@ void setup() {
   // 8. Configure Web Server Routes
   server.on("/api/data", HTTP_GET, handleApiData);
   server.begin();
+  Serial.println(F("[HTTP] Local REST API started at /api/data"));
 
-  // Initial sensor read and cloud push
+  // Initial sensor read and GitHub sync
   readSensors();
-  pushDataToCloud();
+  pushDataToGithub();
 
   // Switch to Screen 1
   currentScreen = SCREEN_TIME;
@@ -427,7 +533,10 @@ void setup() {
 // ARDUINO MAIN LOOP
 // ==========================================================================
 void loop() {
-  server.handleClient();
+  if (wifiConnected) {
+    server.handleClient();
+  }
+
   handleTouchSensor();
 
   // 1. Periodic Sensor Readings (Every 2 seconds)
@@ -436,10 +545,10 @@ void loop() {
     readSensors();
   }
 
-  // 2. Automated Cloud Push (Every 3 seconds)
-  if (millis() - lastCloudSyncTime >= CLOUD_SYNC_MS) {
-    lastCloudSyncTime = millis();
-    pushDataToCloud();
+  // 2. Automated GitHub Push (Every 10 seconds)
+  if (millis() - lastGithubSyncTime >= GITHUB_SYNC_MS) {
+    lastGithubSyncTime = millis();
+    pushDataToGithub();
   }
 
   // 3. Refresh Active OLED Screen
