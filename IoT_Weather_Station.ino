@@ -1,23 +1,3 @@
-/**
- * ==========================================================================
- * AEROMETRICS PRO - IoT Weather Station & OLED HUD Firmware
- * Platform: ESP32 (Arduino Framework)
- * Direct Pipeline: ESP32 ---> GitHub (data.json) ---> Phone / Webpage
- *
- * Features:
- *   - Direct GitHub Contents API Push (Updates data.json on GitHub repository)
- *   - Auto-Detecting I2C Scanner for 0.96" SSD1306 OLED (0x3C / 0x3D)
- *   - Auto-Detecting BMP280 Sensor (0x76 / 0x77)
- *   - DHT11 (Temperature & Humidity)
- *   - Boot Animation ("KARMAKAR INDUSTRY" & Progress Bar)
- *   - Touch Sensor Switching (Screen 1 Time/Date <-> Screen 2 Weather HUD)
- *   - 10-Second Inactivity Auto-revert to Time Screen
- *   - Local REST API on Port 80 (/api/data) & mDNS (esp32-weather.local)
- *   - NTP Time Synchronization over Wi-Fi
- *
- * Developed for: Rudra Workshop / Karmakar Industry
- * ==========================================================================
- */
 
 #include <Wire.h>
 #include <WiFi.h>
@@ -33,7 +13,7 @@
 #include <DHT.h>
 #include "config.h"
 
-// --- Hardware Object Instances ---
+
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET_PIN);
@@ -41,16 +21,16 @@ DHT dht(DHT_PIN, DHT_TYPE);
 Adafruit_BMP280 bmp;
 WebServer server(80);
 
-// --- State Machine Enumeration ---
+
 enum DisplayScreen {
   SCREEN_BOOT = 0,
-  SCREEN_TIME = 1,    // Screen 1: NTP Time & Date
-  SCREEN_WEATHER = 2  // Screen 2: Temperature, Humidity, Pressure
+  SCREEN_TIME = 1,    
+  SCREEN_WEATHER = 2  
 };
 
 DisplayScreen currentScreen = SCREEN_BOOT;
 
-// --- Global Sensor & Timing State Variables ---
+
 float currentTemperature = 0.0;
 float currentHumidity = 0.0;
 float currentPressure = 0.0;
@@ -68,15 +48,11 @@ String currentFileSha = "";
 
 struct tm timeinfo;
 
-// 8x8 WiFi Connected Icon
 const unsigned char epd_bitmap_wifi[] PROGMEM = {
   0b00111100, 0b01000010, 0b10011001, 0b00100100,
   0b01000010, 0b00011000, 0b00011000, 0b00000000
 };
 
-// ==========================================================================
-// BASE64 ENCODER HELPER (Standard Base64)
-// ==========================================================================
 const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 String base64Encode(const String &input) {
@@ -115,9 +91,6 @@ String base64Encode(const String &input) {
   return output;
 }
 
-// ==========================================================================
-// AUTOMATIC I2C SCANNER & INITIALIZER
-// ==========================================================================
 void scanAndInitI2C() {
   Serial.println(F("\n[I2C] Scanning I2C Bus on SDA(21), SCL(22)..."));
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
@@ -166,9 +139,6 @@ void scanAndInitI2C() {
   }
 }
 
-// ==========================================================================
-// OLED DISPLAY RENDERING FUNCTIONS
-// ==========================================================================
 void drawBootScreen(int progressPercent) {
   if (!oledAvailable) return;
 
@@ -279,9 +249,6 @@ void drawScreen2_Weather() {
   display.display();
 }
 
-// ==========================================================================
-// SENSOR ACQUISITION & TELEMETRY
-// ==========================================================================
 void readSensors() {
   float h = dht.readHumidity();
   float t = dht.readTemperature();
@@ -308,9 +275,6 @@ void readSensors() {
   }
 }
 
-// ==========================================================================
-// DIRECT GITHUB REPOSITORY SYNC (ESP32 ---> GitHub ---> Phone)
-// ==========================================================================
 void fetchGithubFileSha() {
   WiFiClientSecure client;
   client.setInsecure();
@@ -400,9 +364,6 @@ void pushDataToGithub() {
   }
 }
 
-// ==========================================================================
-// TOUCH SENSOR INPUT HANDLER
-// ==========================================================================
 bool readTouchInput() {
 #if USE_CAPACITIVE_TOUCH
   return (touchRead(TOUCH_SENSOR_PIN) < TOUCH_THRESHOLD);
@@ -436,9 +397,6 @@ void handleTouchSensor() {
   }
 }
 
-// ==========================================================================
-// LOCAL REST API HANDLERS
-// ==========================================================================
 void handleApiData() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -456,9 +414,6 @@ void handleApiData() {
   server.send(200, "application/json", json);
 }
 
-// ==========================================================================
-// ARDUINO SETUP & INITIALIZATION
-// ==========================================================================
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -467,10 +422,8 @@ void setup() {
   Serial.println(F("  Karmakar Industry & Rudra Workshop     "));
   Serial.println(F("=========================================="));
 
-  // 1. Scan and Initialize I2C Bus & OLED Display
   scanAndInitI2C();
 
-  // 2. Play Boot Animation & Progress Bar
   if (oledAvailable) {
     for (int p = 10; p <= 100; p += 15) {
       drawBootScreen(p);
@@ -479,16 +432,13 @@ void setup() {
     delay(200);
   }
 
-  // 3. Initialize DHT11
   dht.begin();
   Serial.println(F("[DHT11] Sensor initialized."));
 
-  // 4. Configure Touch Sensor Input
 #if !USE_CAPACITIVE_TOUCH
   pinMode(TOUCH_SENSOR_PIN, INPUT);
 #endif
 
-  // 5. Connect to Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print(F("[WIFI] Connecting to Wi-Fi"));
@@ -506,32 +456,24 @@ void setup() {
     Serial.print(F("[WIFI] Station IP: "));
     Serial.println(WiFi.localIP());
 
-    // 6. Setup mDNS (esp32-weather.local)
     if (MDNS.begin("esp32-weather")) {
       Serial.println(F("[mDNS] Responder started at http://esp32-weather.local"));
     }
 
-    // 7. Initialize NTP Client
     configTime(NTP_TIMEZONE_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
   }
 
-  // 8. Configure Web Server Routes
   server.on("/api/data", HTTP_GET, handleApiData);
   server.begin();
   Serial.println(F("[HTTP] Local REST API started at /api/data"));
 
-  // Initial sensor read and GitHub sync
   readSensors();
   pushDataToGithub();
 
-  // Switch to Screen 1
   currentScreen = SCREEN_TIME;
   lastScreenTouchTime = millis();
 }
 
-// ==========================================================================
-// ARDUINO MAIN LOOP
-// ==========================================================================
 void loop() {
   if (wifiConnected) {
     server.handleClient();
@@ -539,19 +481,16 @@ void loop() {
 
   handleTouchSensor();
 
-  // 1. Periodic Sensor Readings (Every 2 seconds)
   if (millis() - lastSensorReadTime >= SENSOR_READ_MS) {
     lastSensorReadTime = millis();
     readSensors();
   }
 
-  // 2. Automated GitHub Push (Every 10 seconds)
   if (millis() - lastGithubSyncTime >= GITHUB_SYNC_MS) {
     lastGithubSyncTime = millis();
     pushDataToGithub();
   }
-
-  // 3. Refresh Active OLED Screen
+  
   if (currentScreen == SCREEN_TIME) {
     drawScreen1_TimeDate();
   } else if (currentScreen == SCREEN_WEATHER) {
