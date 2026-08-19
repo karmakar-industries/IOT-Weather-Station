@@ -1,7 +1,7 @@
 {
   "temp": 28.5,
   "humidity": 87,
-  "pressure": 980.1,
+  "pressure": 980.0,
   "altitude": 280,
-  "timestamp": 10
+  "timestamp": 20
 }
